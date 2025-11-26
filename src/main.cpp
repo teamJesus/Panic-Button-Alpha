@@ -90,14 +90,41 @@ bool panicMode = false;
 unsigned long panicBeepLastTime = 0;
 char panicName[NAME_MAX_LEN + 1];
 bool panicBeepState = false;  // tracks if beeping or silent
-#define PANIC_BEEP_INTERVAL 300  // milliseconds for each on/off cycle (alternating steady)
+#define PANIC_BEEP_INTERVAL 100  // milliseconds for each on/off cycle (alternating steady)
+
+// Helper: valid characters for naming (capital letters and digits)
+const char VALID_CHARS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ";
+#define VALID_CHARS_COUNT 37  // 26 letters + 10 digits + 1 space
+
+// Helper: get next valid character
+char getNextChar(char current)
+{
+    for (int i = 0; i < VALID_CHARS_COUNT - 1; ++i)
+    {
+        if (VALID_CHARS[i] == current)
+            return VALID_CHARS[i + 1];
+    }
+    return VALID_CHARS[0];  // wrap around
+}
+
+// Helper: get previous valid character
+char getPrevChar(char current)
+{
+    for (int i = 1; i < VALID_CHARS_COUNT; ++i)
+    {
+        if (VALID_CHARS[i] == current)
+            return VALID_CHARS[i - 1];
+    }
+    return VALID_CHARS[VALID_CHARS_COUNT - 1];  // wrap around
+}
 
 // Helper: update name display on LCD while in naming mode
 void updateNameDisplay()
 {
     lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Edit:");
+    lcd.setCursor(namePos, 0);
+    lcd.print("v");  // down arrow pointing to current character
+    
     lcd.setCursor(0, 1);
     for (int i = 0; i < NAME_MAX_LEN && i < LCD_COLS; ++i)
     {
@@ -256,27 +283,29 @@ void loop()
                 if (namingMode)
                 {
                     if (i == 0)
-                    { // button1 decrease char
+                    { // button1 decrease char (to previous valid character)
                         char &ch = deviceName[namePos];
-                        if (ch <= 32)
-                            ch = 126;
-                        else
-                            ch--;
+                        ch = getPrevChar(ch);
                         updateNameDisplay();
                         beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
                     }
                     else if (i == 1)
-                    { // button2 increase char
+                    { // button2 increase char (to next valid character)
                         char &ch = deviceName[namePos];
-                        if (ch >= 126)
-                            ch = 32;
-                        else
-                            ch++;
+                        ch = getNextChar(ch);
                         updateNameDisplay();
                         beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
                     }
                     else if (i == 2)
-                    { // button3 move next
+                    { // button3 move cursor back
+                        namePos--;
+                        if (namePos < 0)
+                            namePos = NAME_MAX_LEN - 1;
+                        updateNameDisplay();
+                        beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
+                    }
+                    else if (i == 3)
+                    { // button4 move cursor forward
                         namePos++;
                         if (namePos >= NAME_MAX_LEN)
                             namePos = 0;
@@ -430,6 +459,15 @@ void loop()
                         lcd.print("Buttons: -----");
                     }
                 }
+                else if (i == 3 && namingMode)
+                { // button4 long-press in naming mode: clear name
+                    // Fill name with spaces and reset cursor to position 0
+                    for (int j = 0; j < NAME_MAX_LEN; ++j)
+                        deviceName[j] = ' ';
+                    namePos = 0;
+                    updateNameDisplay();
+                    beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
+                }
             }
         }
     }
@@ -578,18 +616,7 @@ void loop()
             lastPanicSent = now;
         }
 #endif
-        
-        // Exit panic mode only on button 1, 2, 3, or 4 press (not button 5)
-        if (stableState[0] == LOW || stableState[1] == LOW || stableState[2] == LOW || stableState[3] == LOW)
-        {
-            panicMode = false;
-            panicBeepState = false;
-            noTone(PIN_BUZZER);
-            buzzerEndTime = 0;
-            lcd.clear();
-            lcd.setCursor(0, 0);
-            lcd.print("Buttons: -----");
-        }
+       
     }
 
     // Resend 'P#' periodically while a local button is held (improves reliability)
