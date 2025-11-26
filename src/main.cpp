@@ -17,8 +17,6 @@
 #define PIN_BUTTON_4 6
 #define PIN_BUTTON_5 7
 
-#define QUIET_DEBUG
-
 // Buzzer pin (PWM-capable)
 #define PIN_BUZZER 10
 
@@ -53,7 +51,7 @@ const unsigned long DEBOUNCE_MS = 10;
 const unsigned long BAUD_RATE = 9600;
 const unsigned long LORA_FREQ = 915E6;
 const unsigned int BEEP_DURATION_MS = 80;
-const unsigned int BEEP_FREQ_HZ = 4000;
+const unsigned int BEEP_FREQ_HZ = 500; // Change to 4000 in the future
 // How often the transmitter re-sends the 'pressed' packet while a button is held (ms)
 #define HOLD_SEND_INTERVAL_MS 200
 // How long the receiver will keep showing a received press without updates before clearing (ms)
@@ -87,6 +85,13 @@ byte namePos = 0;
 unsigned long pressStart[5] = {0, 0, 0, 0, 0};
 byte longPressHandled[5] = {0, 0, 0, 0, 0};
 
+// Panic mode state
+bool panicMode = false;
+unsigned long panicBeepLastTime = 0;
+char panicName[NAME_MAX_LEN + 1];
+bool panicBeepState = false;  // tracks if beeping or silent
+#define PANIC_BEEP_INTERVAL 300  // milliseconds for each on/off cycle (alternating steady)
+
 // Helper: update name display on LCD while in naming mode
 void updateNameDisplay()
 {
@@ -115,9 +120,9 @@ void saveNameToEEPROM()
 // Start a non-blocking beep: returns immediately and stops automatically later
 void beep(unsigned int ms = BEEP_DURATION_MS, unsigned int freq = BEEP_FREQ_HZ)
 {
-    #ifdef QUIET_DEBUG
-        return; 
-    #endif
+#ifdef QUIET_DEBUG
+    return;
+#endif
     tone(PIN_BUZZER, freq);
     buzzerEndTime = millis() + ms;
     buzzerFreqActive = freq;
@@ -127,10 +132,10 @@ void setup()
 {
     // Delay to allow USB/serial monitor to connect
     delay(2000);
-    
+
     Serial.begin(BAUD_RATE);
     delay(500); // wait for serial monitor to be ready
-    
+
     // Load device name from EEPROM (fixed length NAME_MAX_LEN)
     for (int i = 0; i < NAME_MAX_LEN; ++i)
     {
@@ -140,7 +145,7 @@ void setup()
         deviceName[i] = c;
     }
     deviceName[NAME_MAX_LEN] = '\0';
-    
+
     // Buttons
     pinMode(PIN_BUTTON_1, INPUT_PULLUP);
     pinMode(PIN_BUTTON_2, INPUT_PULLUP);
@@ -258,7 +263,7 @@ void loop()
                         else
                             ch--;
                         updateNameDisplay();
-                        beep(40, 2000);
+                        beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
                     }
                     else if (i == 1)
                     { // button2 increase char
@@ -268,7 +273,7 @@ void loop()
                         else
                             ch++;
                         updateNameDisplay();
-                        beep(40, 2000);
+                        beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
                     }
                     else if (i == 2)
                     { // button3 move next
@@ -276,19 +281,44 @@ void loop()
                         if (namePos >= NAME_MAX_LEN)
                             namePos = 0;
                         updateNameDisplay();
-                        beep(40, 2000);
+                        beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
                     }
                 }
                 else
                 {
-                    lcd.setCursor(i, 1);
-                    lcd.print((char)('1' + i));
-                    // small beep
-                    beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
+                    // Don't display buttons 1-3 locally, only button 4 and 5
+                    if (i == 3)
+                    {
+                        // button 4: show on LCD
+                        lcd.setCursor(i, 1);
+                        lcd.print((char)('1' + i));
+                        beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
+                    }
+                    else if (i == 4)
+                    {
+                        // button 5: trigger panic mode
+                        panicMode = true;
+                        memcpy(panicName, deviceName, NAME_MAX_LEN + 1);
+                        panicBeepLastTime = 0;
+                        beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
+                    }
+                    else
+                    {
+                        // buttons 1-3: just beep
+                        beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
+                    }
+                    
 // send press only if not in naming mode
 #ifdef USE_LORA
                     if (loRaOk && i == 3)
                     {
+                        // Send beep signal to other unit
+                        char beepMsg[2] = {'B', '\0'};
+                        LoRa.beginPacket();
+                        LoRa.print(beepMsg);
+                        LoRa.endPacket();
+                        
+                        // Also send device name with button 4 (for reference)
                         // Only button 4 (index 3) transmits. Build C-string without using Arduino String.
                         char out[NAME_MAX_LEN + 4]; // 'P' + digit + optional '|' + name + NUL
                         int pos = 0;
@@ -315,6 +345,30 @@ void loop()
                         LoRa.endPacket();
                         lastHoldSend[i] = millis();
                     }
+                    else if (loRaOk && i == 4)
+                    {
+                        // Send panic signal with name to other unit
+                        char panicMsg[NAME_MAX_LEN + 3]; // 'X' + '|' + name
+                        int pos = 0;
+                        panicMsg[pos++] = 'X';  // X = panic
+                        panicMsg[pos++] = '|';
+                        
+                        const char *namePtr = deviceName;
+                        size_t len = strlen(namePtr);
+                        while (len > 0 && namePtr[len - 1] == ' ')
+                            --len;
+                        
+                        if (len > 0)
+                        {
+                            memcpy(panicMsg + pos, namePtr, len);
+                            pos += len;
+                        }
+                        panicMsg[pos] = '\0';
+                        
+                        LoRa.beginPacket();
+                        LoRa.print(panicMsg);
+                        LoRa.endPacket();
+                    }
 #endif
                 }
             }
@@ -323,8 +377,12 @@ void loop()
                 // If in naming mode, do not send release; handle long-press saving elsewhere
                 if (!namingMode)
                 {
-                    lcd.setCursor(i, 1);
-                    lcd.print('-');
+                    // Only show button 4 release on LCD
+                    if (i == 3)
+                    {
+                        lcd.setCursor(i, 1);
+                        lcd.print('-');
+                    }
 #ifdef USE_LORA
                     if (loRaOk && i == 3)
                     {
@@ -393,63 +451,58 @@ void loop()
             payload[payloadLen] = '\0'; // null-terminate
             if (payloadLen > 0)
             {
-                // Expecting 'P#' for press or 'R#' for release, or legacy single-digit '#'
                 unsigned long now = millis();
-                if (payloadLen == 1)
+                
+                // Check for beep command
+                if (payloadLen == 1 && payload[0] == 'B')
                 {
-                    char c = payload[0];
-                    int idx = (int)(c - '1');
-                    if (idx >= 0 && idx <= 3)
+                    beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
+                }
+                // Check for panic signal (format: X|name)
+                else if (payloadLen > 1 && payload[0] == 'X')
+                {
+                    const char *pipePos = strchr(payload, '|');
+                    if (pipePos != NULL && pipePos + 1 < payload + payloadLen)
                     {
-                        lcd.setCursor(idx, 1);
-                        lcd.print(c);
+                        const char *nameStart = pipePos + 1;
+                        int nameLen = payloadLen - (nameStart - payload);
+                        // Enter panic mode with remote device name
+                        panicMode = true;
+                        memset(panicName, 0, NAME_MAX_LEN + 1);
+                        if (nameLen > NAME_MAX_LEN)
+                            nameLen = NAME_MAX_LEN;
+                        memcpy(panicName, nameStart, nameLen);
+                        panicBeepLastTime = 0;  // trigger immediate beep
                         beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
-                        lastReceivedAt[idx] = now;
                     }
                 }
-                else if (payloadLen >= 2)
+                // Only process button 4 name transmissions (format: P4|name)
+                else if (payloadLen > 1)
                 {
-                    char cmd = payload[0];
-                    char val = payload[1];
-                    int idx = (int)(val - '1');
-                    if (idx >= 0 && idx <= 3)
+                    const char *pipePos = strchr(payload, '|');
+                    if (pipePos != NULL && pipePos + 1 < payload + payloadLen)
                     {
-                        if (cmd == 'P')
-                        {
-                            lcd.setCursor(idx, 1);
-                            lcd.print(val);
-                            // If there's a name attached (format: P4|name), parse and display it on row 0
-                            const char *pipePos = strchr(payload, '|');
-                            if (pipePos != NULL && pipePos + 1 < payload + payloadLen)
-                            {
-                                const char *nameStart = pipePos + 1;
-                                int nameLen = payloadLen - (nameStart - payload);
-                                // Clear row 0 first
-                                lcd.setCursor(0, 0);
-                                for (int p = 0; p < LCD_COLS; ++p)
-                                    lcd.print(' ');
-                                // Print name (truncate to LCD_COLS if necessary)
-                                lcd.setCursor(0, 0);
-                                for (int p = 0; p < nameLen && p < LCD_COLS; ++p)
-                                    lcd.print(nameStart[p]);
-                            }
-                            beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
-                            lastReceivedAt[idx] = now;
-                        }
-                        else if (cmd == 'R')
-                        {
-                            // clear the digit (print '-') and clear name row if it was for button4
-                            lcd.setCursor(idx, 1);
-                            lcd.print('-');
-                            lastReceivedAt[idx] = 0;
-                            if (idx == 3)
-                            {
-                                // clear name row
-                                lcd.setCursor(0, 0);
-                                for (int p = 0; p < LCD_COLS; ++p)
-                                    lcd.print(' ');
-                            }
-                        }
+                        const char *nameStart = pipePos + 1;
+                        int nameLen = payloadLen - (nameStart - payload);
+                        // Clear row 0 first
+                        lcd.setCursor(0, 0);
+                        for (int p = 0; p < LCD_COLS; ++p)
+                            lcd.print(' ');
+                        // Print name (truncate to LCD_COLS if necessary)
+                        lcd.setCursor(0, 0);
+                        for (int p = 0; p < nameLen && p < LCD_COLS; ++p)
+                            lcd.print(nameStart[p]);
+                        beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
+                        lastReceivedAt[3] = now;
+                    }
+                    // Check for release (R# clears the name)
+                    else if (payloadLen >= 2 && payload[0] == 'R')
+                    {
+                        // Clear name row on release
+                        lcd.setCursor(0, 0);
+                        for (int p = 0; p < LCD_COLS; ++p)
+                            lcd.print(' ');
+                        lastReceivedAt[3] = 0;
                     }
                 }
             }
@@ -457,7 +510,88 @@ void loop()
     }
 #endif
 
-  
+    // Handle panic mode display and beeping
+    if (panicMode)
+    {
+        unsigned long now = millis();
+        
+        // Display panic mode on LCD
+        lcd.setCursor(0, 0);
+        for (int p = 0; p < LCD_COLS; ++p)
+            lcd.print(' ');
+        lcd.setCursor(0, 0);
+        // Display name or "PANIC"
+        const char *name = panicName;
+        size_t nameLen = strlen(name);
+        if (nameLen > 0)
+        {
+            for (int p = 0; p < (int)nameLen && p < LCD_COLS; ++p)
+                lcd.print(name[p]);
+        }
+        
+        lcd.setCursor(0, 1);
+        for (int p = 0; p < LCD_COLS; ++p)
+            lcd.print(' ');
+        lcd.setCursor(0, 1);
+        lcd.print("PANIC");
+        
+        // Rapid beeping every PANIC_BEEP_INTERVAL ms
+        if (now - panicBeepLastTime >= PANIC_BEEP_INTERVAL)
+        {
+            panicBeepState = !panicBeepState;
+            if (panicBeepState)
+            {
+                tone(PIN_BUZZER, BEEP_FREQ_HZ);
+            }
+            else
+            {
+                noTone(PIN_BUZZER);
+            }
+            panicBeepLastTime = now;
+        }
+        
+        // Resend panic signal periodically to other unit
+#ifdef USE_LORA
+        static unsigned long lastPanicSent = 0;
+        if (loRaOk && (lastPanicSent == 0 || (now - lastPanicSent) >= 500))
+        {
+            char panicMsg[NAME_MAX_LEN + 3];
+            int pos = 0;
+            panicMsg[pos++] = 'X';
+            panicMsg[pos++] = '|';
+            
+            const char *namePtr = panicName;
+            size_t len = strlen(namePtr);
+            while (len > 0 && namePtr[len - 1] == ' ')
+                --len;
+            
+            if (len > 0)
+            {
+                memcpy(panicMsg + pos, namePtr, len);
+                pos += len;
+            }
+            panicMsg[pos] = '\0';
+            
+            LoRa.beginPacket();
+            LoRa.print(panicMsg);
+            LoRa.endPacket();
+            lastPanicSent = now;
+        }
+#endif
+        
+        // Exit panic mode only on button 1, 2, 3, or 4 press (not button 5)
+        if (stableState[0] == LOW || stableState[1] == LOW || stableState[2] == LOW || stableState[3] == LOW)
+        {
+            panicMode = false;
+            panicBeepState = false;
+            noTone(PIN_BUZZER);
+            buzzerEndTime = 0;
+            lcd.clear();
+            lcd.setCursor(0, 0);
+            lcd.print("Buttons: -----");
+        }
+    }
+
     // Resend 'P#' periodically while a local button is held (improves reliability)
 #ifdef USE_LORA
     if (loRaOk)
