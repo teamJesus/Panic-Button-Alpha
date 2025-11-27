@@ -92,6 +92,27 @@ char panicName[NAME_MAX_LEN + 1];
 bool panicBeepState = false;  // tracks if beeping or silent
 #define PANIC_BEEP_INTERVAL 100  // milliseconds for each on/off cycle (alternating steady)
 
+// RSSI signal strength display (0-100% where 100 is strongest)
+byte rssiPercent = 0;
+unsigned long lastRssiUpdate = 0;
+#define RSSI_MIN -120  // Weakest signal (0%)
+#define RSSI_MAX -30   // Strongest signal (100%)
+#define RSSI_TIMEOUT 2000  // milliseconds before resetting to 0
+
+// Helper: convert RSSI dBm to percentage (0-100%)
+void updateRssiDisplay(int rssi)
+{
+    // Clamp RSSI to valid range
+    if (rssi > RSSI_MAX)
+        rssi = RSSI_MAX;
+    if (rssi < RSSI_MIN)
+        rssi = RSSI_MIN;
+    
+    // Convert dBm to percentage
+    rssiPercent = map(rssi, RSSI_MIN, RSSI_MAX, 0, 100);
+    lastRssiUpdate = millis();
+}
+
 // Helper: valid characters for naming (capital letters and digits)
 const char VALID_CHARS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ";
 #define VALID_CHARS_COUNT 37  // 26 letters + 10 digits + 1 space
@@ -122,11 +143,27 @@ char getPrevChar(char current)
 void updateNameDisplay()
 {
     lcd.clear();
-    lcd.setCursor(namePos, 0);
-    lcd.print("v");  // down arrow pointing to current character
+    
+    // Draw RSSI percentage on right side (top row)
+    lcd.setCursor(LCD_COLS - 3, 0);
+    if (rssiPercent < 10)
+        lcd.print("  ");
+    else if (rssiPercent < 100)
+        lcd.print(" ");
+    char buf[4];
+    sprintf(buf, "%d", rssiPercent);
+    lcd.print(buf);
+    lcd.print("%");
+    
+    // Draw cursor arrow and name
+    if (namePos < LCD_COLS - 4)
+    {
+        lcd.setCursor(namePos, 0);
+        lcd.print("v");
+    }
     
     lcd.setCursor(0, 1);
-    for (int i = 0; i < NAME_MAX_LEN && i < LCD_COLS; ++i)
+    for (int i = 0; i < NAME_MAX_LEN && i < (LCD_COLS - 2); ++i)
     {
         char c = deviceName[i];
         if (c < 32)
@@ -191,8 +228,6 @@ void setup()
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Wiring Test");
-    lcd.setCursor(0, 1);
-    lcd.print("Buttons: -----");
 
 #ifdef USE_LORA
     // LoRa init
@@ -229,10 +264,6 @@ void setup()
     {
         loRaOk = true;
         lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print("LoRa: OK");
-        lcd.setCursor(0, 1);
-        lcd.print("Buttons: -----");
     }
 #else
     lcd.setCursor(0, 0);
@@ -298,8 +329,9 @@ void loop()
                     }
                     else if (i == 2)
                     { // button3 move cursor back
-                        namePos--;
-                        if (namePos < 0)
+                        if (namePos > 0)
+                            namePos--;
+                        else
                             namePos = NAME_MAX_LEN - 1;
                         updateNameDisplay();
                         beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
@@ -315,12 +347,10 @@ void loop()
                 }
                 else
                 {
-                    // Don't display buttons 1-3 locally, only button 4 and 5
+                    // Don't display buttons 1-3 locally, only button 5 (panic)
                     if (i == 3)
                     {
-                        // button 4: show on LCD
-                        lcd.setCursor(i, 1);
-                        lcd.print((char)('1' + i));
+                        // button 4: just beep, don't display
                         beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
                     }
                     else if (i == 4)
@@ -406,12 +436,7 @@ void loop()
                 // If in naming mode, do not send release; handle long-press saving elsewhere
                 if (!namingMode)
                 {
-                    // Only show button 4 release on LCD
-                    if (i == 3)
-                    {
-                        lcd.setCursor(i, 1);
-                        lcd.print('-');
-                    }
+                    // Don't display button releases on LCD
 #ifdef USE_LORA
                     if (loRaOk && i == 3)
                     {
@@ -455,8 +480,6 @@ void loop()
                         lcd.print("Name saved");
                         delay(600);
                         lcd.clear();
-                        lcd.setCursor(0, 0);
-                        lcd.print("Buttons: -----");
                     }
                 }
                 else if (i == 3 && namingMode)
@@ -487,6 +510,11 @@ void loop()
                 payload[payloadLen++] = (char)LoRa.read();
             }
             payload[payloadLen] = '\0'; // null-terminate
+            
+            // Update RSSI display
+            int rssi = LoRa.packetRssi();
+            updateRssiDisplay(rssi);
+            
             if (payloadLen > 0)
             {
                 unsigned long now = millis();
@@ -553,23 +581,28 @@ void loop()
     {
         unsigned long now = millis();
         
-        // Display panic mode on LCD
-        lcd.setCursor(0, 0);
-        for (int p = 0; p < LCD_COLS; ++p)
-            lcd.print(' ');
-        lcd.setCursor(0, 0);
-        // Display name or "PANIC"
+        // Display panic mode on LCD with RSSI % on right
+        lcd.setCursor(LCD_COLS - 3, 0);
+        if (rssiPercent < 10)
+            lcd.print("  ");
+        else if (rssiPercent < 100)
+            lcd.print(" ");
+        char buf[4];
+        sprintf(buf, "%d", rssiPercent);
+        lcd.print(buf);
+        lcd.print("%");
+        
+        // Display name on top row (left side)
         const char *name = panicName;
         size_t nameLen = strlen(name);
+        lcd.setCursor(0, 0);
         if (nameLen > 0)
         {
-            for (int p = 0; p < (int)nameLen && p < LCD_COLS; ++p)
+            for (int p = 0; p < (int)nameLen && p < (LCD_COLS - 5); ++p)
                 lcd.print(name[p]);
         }
         
-        lcd.setCursor(0, 1);
-        for (int p = 0; p < LCD_COLS; ++p)
-            lcd.print(' ');
+        // Display "PANIC" on bottom row (left side)
         lcd.setCursor(0, 1);
         lcd.print("PANIC");
         
@@ -631,7 +664,19 @@ void loop()
             buzzerFreqActive = 0;
         }
         unsigned long now = millis();
-        // Only resend for button 4 (index 3)
+        
+        // Transmit constantly every 500ms for signal testing (silent, no beep/name display)
+        static unsigned long lastConstantTx = 0;
+        if (lastConstantTx == 0 || (now - lastConstantTx) >= 500)
+        {
+            char out[3] = {'T', 'X', '\0'};  // Silent test packet, won't trigger beep/display
+            LoRa.beginPacket();
+            LoRa.print(out);
+            LoRa.endPacket();
+            lastConstantTx = now;
+        }
+        
+        // Only resend for button 4 (index 3) if held
         if (stableState[3] == LOW)
         {
 
@@ -683,4 +728,31 @@ void loop()
         }
     }
 #endif
+    
+    // Show signal strength on main idle screen (when not in naming or panic mode)
+    if (!namingMode && !panicMode)
+    {
+        static unsigned long lastMainDisplay = 0;
+        unsigned long now = millis();
+        if (lastMainDisplay == 0 || (now - lastMainDisplay) >= 100)
+        {
+            lcd.setCursor(LCD_COLS - 3, 0);
+            if (rssiPercent < 10)
+                lcd.print("  ");
+            else if (rssiPercent < 100)
+                lcd.print(" ");
+            char buf[4];
+            sprintf(buf, "%d", rssiPercent);
+            lcd.print(buf);
+            lcd.print("%");
+            lastMainDisplay = now;
+        }
+    }
+    
+    // Reset RSSI to 0 if no packets received for RSSI_TIMEOUT
+    unsigned long now = millis();
+    if (rssiPercent > 0 && (now - lastRssiUpdate) > RSSI_TIMEOUT)
+    {
+        rssiPercent = 0;
+    }
 }
