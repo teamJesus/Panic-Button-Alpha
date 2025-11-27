@@ -266,7 +266,7 @@ void setup()
         // Optimize for 2km range with responsive beeps
         LoRa.setTxPower(20);              // Max power (0-20 dBm)
         LoRa.setSignalBandwidth(125E3);   // 125kHz bandwidth for maximum range
-        LoRa.setSpreadingFactor(10);      // SF10 (~500ms per packet, 1km+ range)
+        LoRa.setSpreadingFactor(12);      // SF12 for maximum range (~1.5s per packet)
         LoRa.setCodingRate4(8);           // 4/8 coding for error correction
         lcd.clear();
     }
@@ -376,13 +376,7 @@ void loop()
 #ifdef USE_LORA
                     if (loRaOk && i == 3)
                     {
-                        // Send beep signal to other unit
-                        char beepMsg[2] = {'B', '\0'};
-                        LoRa.beginPacket();
-                        LoRa.print(beepMsg);
-                        LoRa.endPacket(true);  // Non-blocking
-                        
-                        // Also send device name with button 4 (for reference)
+                        // Send device name with button 4 (for reference)
                         // Only button 4 (index 3) transmits. Build C-string without using Arduino String.
                         char out[NAME_MAX_LEN + 4]; // 'P' + digit + optional '|' + name + NUL
                         int pos = 0;
@@ -524,45 +518,50 @@ void loop()
             {
                 unsigned long now = millis();
                 
-                // Check for beep command
-                if (payloadLen == 1 && payload[0] == 'B')
+                // Skip test packets
+                if (!(payloadLen == 2 && payload[0] == 'T' && payload[1] == 'X'))
                 {
-                    beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
-                }
-                // Check for panic signal (format: X|name)
-                else if (payloadLen > 1 && payload[0] == 'X')
-                {
-                    const char *pipePos = strchr(payload, '|');
-                    if (pipePos != NULL && pipePos + 1 < payload + payloadLen)
+                    // Check for beep command
+                    if (payloadLen == 1 && payload[0] == 'B')
                     {
-                        const char *nameStart = pipePos + 1;
-                        int nameLen = payloadLen - (nameStart - payload);
-                        // Enter panic mode with remote device name
-                        panicMode = true;
-                        memset(panicName, 0, NAME_MAX_LEN + 1);
-                        if (nameLen > NAME_MAX_LEN)
-                            nameLen = NAME_MAX_LEN;
-                        memcpy(panicName, nameStart, nameLen);
-                        panicBeepLastTime = 0;  // trigger immediate beep
                         beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
                     }
-                }
-                // Only process button 4 name transmissions (format: P4|name)
-                else if (payloadLen > 1)
-                {
-                    const char *pipePos = strchr(payload, '|');
-                    if (pipePos != NULL && pipePos + 1 < payload + payloadLen)
+                    // Check for panic signal (format: X|name)
+                    else if (payloadLen > 1 && payload[0] == 'X')
                     {
-                        const char *nameStart = pipePos + 1;
-                        int nameLen = payloadLen - (nameStart - payload);
-                        // Clear row 0 first
-                        lcd.setCursor(0, 0);
-                        for (int p = 0; p < LCD_COLS; ++p)
-                            lcd.print(' ');
-                        // Print name (truncate to LCD_COLS if necessary)
-                        lcd.setCursor(0, 0);
-                        for (int p = 0; p < nameLen && p < LCD_COLS; ++p)
-                            lcd.print(nameStart[p]);
+                        const char *pipePos = strchr(payload, '|');
+                        if (pipePos != NULL && pipePos + 1 < payload + payloadLen)
+                        {
+                            const char *nameStart = pipePos + 1;
+                            int nameLen = payloadLen - (nameStart - payload);
+                            // Enter panic mode with remote device name
+                            panicMode = true;
+                            memset(panicName, 0, NAME_MAX_LEN + 1);
+                            if (nameLen > NAME_MAX_LEN)
+                                nameLen = NAME_MAX_LEN;
+                            memcpy(panicName, nameStart, nameLen);
+                            panicBeepLastTime = 0;  // trigger immediate beep
+                            beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
+                        }
+                    }
+                    // Only process button 4 name transmissions (format: P4 or P4|name)
+                    else if (payloadLen > 1 && payload[0] == 'P')
+                    {
+                        const char *pipePos = strchr(payload, '|');
+                        if (pipePos != NULL && pipePos + 1 < payload + payloadLen)
+                        {
+                            const char *nameStart = pipePos + 1;
+                            int nameLen = payloadLen - (nameStart - payload);
+                            // Clear row 0 first
+                            lcd.setCursor(0, 0);
+                            for (int p = 0; p < LCD_COLS; ++p)
+                                lcd.print(' ');
+                            // Print name (truncate to LCD_COLS if necessary)
+                            lcd.setCursor(0, 0);
+                            for (int p = 0; p < nameLen && p < LCD_COLS; ++p)
+                                lcd.print(nameStart[p]);
+                        }
+                        // Beep on any P4 packet (with or without name)
                         beep(BEEP_DURATION_MS, BEEP_FREQ_HZ);
                         lastReceivedAt[3] = now;
                     }
@@ -579,9 +578,7 @@ void loop()
             }
         }
     }
-#endif
-
-    // Handle panic mode display and beeping
+#endif    // Handle panic mode display and beeping
     if (panicMode)
     {
         unsigned long now = millis();
@@ -670,9 +667,9 @@ void loop()
         }
         unsigned long now = millis();
         
-        // Transmit constantly every 2 seconds for signal testing (SF12 takes ~1.5s per packet)
+        // Transmit constantly every 5 seconds for signal testing (reduce collisions with button presses)
         static unsigned long lastConstantTx = 0;
-        if (lastConstantTx == 0 || (now - lastConstantTx) >= 2000)
+        if (lastConstantTx == 0 || (now - lastConstantTx) >= 5000)
         {
             char out[3] = {'T', 'X', '\0'};  // Silent test packet, won't trigger beep/display
             LoRa.beginPacket();
