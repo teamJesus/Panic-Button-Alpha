@@ -49,7 +49,7 @@
 // ============ OPERATIONAL CONSTANTS ============
 const unsigned long DEBOUNCE_MS = 10;
 const unsigned long BAUD_RATE = 9600;
-const unsigned long LORA_FREQ = 915E6;
+const unsigned long LORA_FREQ = 915E6;  // 915 MHz
 const unsigned int BEEP_DURATION_MS = 80;
 const unsigned int BEEP_FREQ_HZ = 500; // Change to 4000 in the future
 // How often the transmitter re-sends the 'pressed' packet while a button is held (ms)
@@ -97,7 +97,7 @@ byte rssiPercent = 0;
 unsigned long lastRssiUpdate = 0;
 #define RSSI_MIN -120  // Weakest signal (0%)
 #define RSSI_MAX -30   // Strongest signal (100%)
-#define RSSI_TIMEOUT 2000  // milliseconds before resetting to 0
+#define RSSI_TIMEOUT 5000  // milliseconds before resetting to 0 (SF10 packets ~500ms)
 
 // Helper: convert RSSI dBm to percentage (0-100%)
 void updateRssiDisplay(int rssi)
@@ -263,6 +263,11 @@ void setup()
     else
     {
         loRaOk = true;
+        // Optimize for 2km range with responsive beeps
+        LoRa.setTxPower(20);              // Max power (0-20 dBm)
+        LoRa.setSignalBandwidth(125E3);   // 125kHz bandwidth for maximum range
+        LoRa.setSpreadingFactor(10);      // SF10 (~500ms per packet, 1km+ range)
+        LoRa.setCodingRate4(8);           // 4/8 coding for error correction
         lcd.clear();
     }
 #else
@@ -375,7 +380,7 @@ void loop()
                         char beepMsg[2] = {'B', '\0'};
                         LoRa.beginPacket();
                         LoRa.print(beepMsg);
-                        LoRa.endPacket();
+                        LoRa.endPacket(true);  // Non-blocking
                         
                         // Also send device name with button 4 (for reference)
                         // Only button 4 (index 3) transmits. Build C-string without using Arduino String.
@@ -401,7 +406,7 @@ void loop()
 
                         LoRa.beginPacket();
                         LoRa.print(out);
-                        LoRa.endPacket();
+                        LoRa.endPacket(true);  // Non-blocking
                         lastHoldSend[i] = millis();
                     }
                     else if (loRaOk && i == 4)
@@ -426,7 +431,7 @@ void loop()
                         
                         LoRa.beginPacket();
                         LoRa.print(panicMsg);
-                        LoRa.endPacket();
+                        LoRa.endPacket(true);  // Non-blocking
                     }
 #endif
                 }
@@ -443,7 +448,7 @@ void loop()
                         char out[4] = {'R', (char)('1' + i), '\0'};
                         LoRa.beginPacket();
                         LoRa.print(out);
-                        LoRa.endPacket();
+                        LoRa.endPacket(true);  // Non-blocking
                         lastHoldSend[i] = 0;
                     }
 #endif
@@ -645,7 +650,7 @@ void loop()
             
             LoRa.beginPacket();
             LoRa.print(panicMsg);
-            LoRa.endPacket();
+            LoRa.endPacket(true);  // Non-blocking
             lastPanicSent = now;
         }
 #endif
@@ -665,14 +670,14 @@ void loop()
         }
         unsigned long now = millis();
         
-        // Transmit constantly every 500ms for signal testing (silent, no beep/name display)
+        // Transmit constantly every 2 seconds for signal testing (SF12 takes ~1.5s per packet)
         static unsigned long lastConstantTx = 0;
-        if (lastConstantTx == 0 || (now - lastConstantTx) >= 500)
+        if (lastConstantTx == 0 || (now - lastConstantTx) >= 2000)
         {
             char out[3] = {'T', 'X', '\0'};  // Silent test packet, won't trigger beep/display
             LoRa.beginPacket();
             LoRa.print(out);
-            LoRa.endPacket();
+            LoRa.endPacket(true);  // Non-blocking
             lastConstantTx = now;
         }
         
@@ -704,7 +709,7 @@ void loop()
 
                 LoRa.beginPacket();
                 LoRa.print(out);
-                LoRa.endPacket();
+                LoRa.endPacket(true);  // Non-blocking
                 lastHoldSend[3] = now;
             }
         }
@@ -736,6 +741,7 @@ void loop()
         unsigned long now = millis();
         if (lastMainDisplay == 0 || (now - lastMainDisplay) >= 100)
         {
+            // Display RSSI % on top right
             lcd.setCursor(LCD_COLS - 3, 0);
             if (rssiPercent < 10)
                 lcd.print("  ");
@@ -745,6 +751,18 @@ void loop()
             sprintf(buf, "%d", rssiPercent);
             lcd.print(buf);
             lcd.print("%");
+            
+            // Display time since last signal on bottom right (tenths of a second)
+            unsigned long timeSinceLastSignal = (now - lastRssiUpdate) / 100;
+            lcd.setCursor(LCD_COLS - 3, 1);
+            if (timeSinceLastSignal < 10)
+                lcd.print("  ");
+            else if (timeSinceLastSignal < 100)
+                lcd.print(" ");
+            sprintf(buf, "%ld", timeSinceLastSignal);
+            lcd.print(buf);
+            lcd.print("t");
+            
             lastMainDisplay = now;
         }
     }
